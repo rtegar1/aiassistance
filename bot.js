@@ -4,6 +4,7 @@ const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 const { exec } = require('child_process');
+const os = require('os'); // Digunakan untuk mendeteksi OS
 
 // Mengambil token dari environment variable
 const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -15,10 +16,16 @@ if (!token) {
 
 const bot = new TelegramBot(token, { polling: true });
 
-const AI_FILE = './identify.md';
-const USER_FILE = './user.md';
+// Gunakan path.join agar penulisan path aman di Windows (\) maupun Linux/Mac (/)
+const AI_FILE = path.join(__dirname, 'identify.json'); 
+const USER_FILE = path.join(__dirname, 'user.json');
 
 let setupState = { step: 0, aiData: {}, userData: {} };
+
+// Deteksi OS dan Shell
+const isWindows = os.platform() === 'win32';
+const currentOS = isWindows ? "Windows" : os.platform() === 'darwin' ? "macOS" : "Linux";
+const defaultShell = isWindows ? 'powershell.exe' : '/bin/bash';
 
 bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
@@ -26,6 +33,7 @@ bot.on('message', async (msg) => {
 
     if (!userText) return;
 
+    // Cek file konfigurasi, jika tidak ada masuk ke mode setup
     if (!fs.existsSync(AI_FILE) || !fs.existsSync(USER_FILE)) {
         handleFullSetup(chatId, userText);
         return;
@@ -34,13 +42,14 @@ bot.on('message', async (msg) => {
     const ai = JSON.parse(fs.readFileSync(AI_FILE, 'utf8'));
     const user = JSON.parse(fs.readFileSync(USER_FILE, 'utf8'));
 
-    // Update Prompt untuk memberi tahu AI bahwa ia menggunakan PowerShell
+    // Prompt dinamis berdasarkan OS
     const systemPrompt = `Nama kamu ${ai.nama}. Tipe ${ai.tipe}. Kamu bicara dengan ${user.panggilan}.
-    KEMAMPUAN WINDOWS 11 (POWERSHELL):
+    LINGKUNGAN SAAT INI: ${currentOS} (Terminal: ${defaultShell})
+    KEMAMPUAN:
     - Buat file: [CREATE_FILE: nama.ext | isi]
-    - Perintah PowerShell: [RUN_CMD: perintah]
+    - Perintah Terminal: [RUN_CMD: perintah]
     - Kirim file ke user: [SEND_FILE: nama_file.ext]
-    Gunakan [SEND_FILE: ...] jika user minta dikirimkan file yang ada di PC.`;
+    Gunakan [SEND_FILE: ...] jika user minta file dari sistem. Gunakan perintah yang sesuai dengan ${currentOS}.`;
 
     try {
         const response = await axios.post('http://localhost:11434/api/generate', {
@@ -51,18 +60,18 @@ bot.on('message', async (msg) => {
 
         let aiReply = response.data.response;
 
-        // --- FITUR: KIRIM FILE DARI PC KE TELEGRAM ---
+        // --- FITUR: KIRIM FILE ---
         if (aiReply.includes('[SEND_FILE:')) {
             const matchSend = aiReply.match(/\[SEND_FILE:\s*(.*?)\]/);
             if (matchSend) {
                 const fileName = matchSend[1].trim();
-                const filePath = path.join(__dirname, fileName);
+                const filePath = path.resolve(__dirname, fileName);
 
                 if (fs.existsSync(filePath)) {
                     bot.sendDocument(chatId, filePath, { caption: `Ini file yang kamu minta, ${user.panggilan}.` });
                     aiReply = aiReply.replace(matchSend[0], "📤 *Mengirim file...*");
                 } else {
-                    aiReply = aiReply.replace(matchSend[0], `❌ File \`${fileName}\` tidak ditemukan di PC.`);
+                    aiReply = aiReply.replace(matchSend[0], `❌ File \`${fileName}\` tidak ditemukan.`);
                 }
             }
         }
@@ -77,27 +86,26 @@ bot.on('message', async (msg) => {
             }
         }
 
-        // --- FITUR: EKSEKUSI POWERSHELL ---
+        // --- FITUR: EKSEKUSI PERINTAH (CMD/BASH) ---
         if (aiReply.includes('[RUN_CMD:')) {
             const matchCmd = aiReply.match(/\[RUN_CMD:\s*(.*?)\]/);
             if (matchCmd) {
                 const command = matchCmd[1].trim();
                 
-                // Menjalankan perintah lewat powershell.exe
-                exec(command, { shell: 'powershell.exe' }, (err, stdout, stderr) => {
-                    let res = `🟦 **PowerShell Output:**\n${stdout ? `\`\`\`\n${stdout}\n\`\`\`` : "✅ Perintah selesai tanpa output."}`;
-                    if (err) res = `❌ **PowerShell Error:**\n\`\`\`\n${stderr || err.message}\n\`\`\``;
+                exec(command, { shell: defaultShell }, (err, stdout, stderr) => {
+                    let res = `💻 **Terminal Output (${currentOS}):**\n${stdout ? `\`\`\`\n${stdout}\n\`\`\`` : "✅ Selesai (Tanpa output)."}`;
+                    if (err) res = `❌ **Error:**\n\`\`\`\n${stderr || err.message}\n\`\`\``;
                     bot.sendMessage(chatId, res, { parse_mode: 'Markdown' });
                 });
                 
-                aiReply = aiReply.replace(matchCmd[0], "⏳ *Menjalankan perintah PowerShell...*");
+                aiReply = aiReply.replace(matchCmd[0], `⏳ *Menjalankan perintah di ${currentOS}...*`);
             }
         }
 
         bot.sendMessage(chatId, aiReply, { parse_mode: 'Markdown' });
 
     } catch (err) {
-        bot.sendMessage(chatId, '❌ Gagal menghubungi Ollama.');
+        bot.sendMessage(chatId, '❌ Gagal menghubungi Ollama. Pastikan Ollama jalan di localhost:11434');
     }
 });
 
@@ -108,7 +116,7 @@ function handleFullSetup(chatId, text) {
             setupState.step = 1; break;
         case 1:
             setupState.aiData.nama = text;
-            bot.sendMessage(chatId, `Nama saya ${text}. Apa **Tipe/Peran** saya?`);
+            bot.sendMessage(chatId, `Nama saya ${text}. Apa **Tipe/Peran** saya? (Contoh: Asisten Pribadi)`);
             setupState.step = 2; break;
         case 2:
             setupState.aiData.tipe = text;
@@ -122,7 +130,7 @@ function handleFullSetup(chatId, text) {
             setupState.userData.panggilan = text;
             fs.writeFileSync(AI_FILE, JSON.stringify(setupState.aiData, null, 2));
             fs.writeFileSync(USER_FILE, JSON.stringify(setupState.userData, null, 2));
-            bot.sendMessage(chatId, `✅ Setup selesai, ${text}!`);
+            bot.sendMessage(chatId, `✅ Setup selesai, ${text}! Sekarang saya siap bekerja di **${currentOS}**.`);
             setupState.step = 0; break;
     }
 }
