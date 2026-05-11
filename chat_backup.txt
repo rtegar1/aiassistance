@@ -1,0 +1,5 @@
+--- Percakapan ---
+User (Bos): kamu bisa membackup percakapan kita hari ini?
+Assistant: (Balasan ini)
+
+--- Akhir Percakapan ---
